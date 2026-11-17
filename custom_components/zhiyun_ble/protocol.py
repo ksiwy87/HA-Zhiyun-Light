@@ -47,6 +47,7 @@ class Command(IntEnum):
     GET_DEVICE_NAME = 0x2003
     GET_FIRMWARE = 0x8001
     SET_HSI = 0x100A
+    SET_BRIGHTNESS_MODE = 0x100B
 
 
 # --- Value ranges ------------------------------------------------------------------
@@ -181,6 +182,17 @@ def encode_hsi(hue: float, saturation: float, intensity: float) -> bytes:
         + b"\x01"
         + struct.pack("<ffH", float(hue), float(saturation), int(round(intensity)))
     )
+
+
+# Light modes for 0x100B (DeviceModeValue in libzylink.so).
+MODE_CCT: Final = 1
+MODE_RGB: Final = 2
+MODE_HSI: Final = 3
+
+
+def encode_brightness_mode(brightness: float, mode: int) -> bytes:
+    """0x100B payload: brightness f32 + mode s8 (switches CCT/RGB/HSI mode)."""
+    return _SUBCMD_CONTROL + b"\x01" + struct.pack("<fb", float(brightness), int(mode))
 
 
 def encode_hsi_query() -> bytes:

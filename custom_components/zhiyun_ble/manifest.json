@@ -1,7 +1,7 @@
 {
   "domain": "zhiyun_ble",
   "name": "Zhiyun Light (BLE)",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "codeowners": [
     "@didim99"
   ],

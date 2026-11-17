@@ -224,6 +224,12 @@ class ZhiyunDevice:
 
     async def _color_temp(self, kelvin: int) -> None:
         clamped = max(p.COLOR_TEMP_MIN_KELVIN, min(p.COLOR_TEMP_MAX_KELVIN, int(kelvin)))
+        if self.supports_color:
+            level = self._state.brightness or self._last_nonzero_brightness
+            await self._write(
+                Command.SET_BRIGHTNESS_MODE, p.encode_brightness_mode(level, p.MODE_CCT)
+            )
+            await asyncio.sleep(_INIT_STEP_DELAY)
         await self._write(Command.SET_COLOR_TEMP, p.encode_color_temp(clamped))
         self._update_state(color_temp_kelvin=clamped, color_mode="color_temp")
 
@@ -231,6 +237,10 @@ class ZhiyunDevice:
         hue = float(hs_color[0]) % 360.0
         sat = max(0.0, min(100.0, float(hs_color[1])))
         level = max(1.0, min(100.0, float(intensity)))
+        await self._write(
+            Command.SET_BRIGHTNESS_MODE, p.encode_brightness_mode(level, p.MODE_HSI)
+        )
+        await asyncio.sleep(_INIT_STEP_DELAY)
         await self._write(Command.SET_HSI, p.encode_hsi(hue, sat, level))
         self._last_nonzero_brightness = level
         self._update_state(
