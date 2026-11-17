@@ -95,7 +95,7 @@ class ZhiyunDevice:
 
         self._available: bool = True
         self._last_nonzero_brightness: float = 50.0
-        code, friendly = p.resolve_model(name)
+        code, friendly = p.resolve_model_any(ble_device.name, name)
         self._state = ZhiyunState(model_code=code, model_name=friendly)
 
     # -----------------------------------------------------------------------------

@@ -103,6 +103,21 @@ def resolve_model(advertised_name: str | None) -> tuple[str | None, str | None]:
     return None, None
 
 
+def resolve_model_any(*names: str | None) -> tuple[str | None, str | None]:
+    """Resolve from advertised names or from an entry title like 'MOLUS X60RGB (AA:BB...)'."""
+    for name in names:
+        code, friendly = resolve_model(name)
+        if code is not None:
+            return code, friendly
+    for name in names:
+        if not name:
+            continue
+        for code, friendly in sorted(MODEL_NAMES.items(), key=lambda kv: -len(kv[1])):
+            if name == friendly or name.startswith(friendly + " "):
+                return code, friendly
+    return None, None
+
+
 def is_supported_name(advertised_name: str | None) -> bool:
     code, _ = resolve_model(advertised_name)
     return code is not None
