@@ -211,8 +211,13 @@ RGB_MODELS: Final[frozenset[str]] = frozenset(
 )
 
 
+# Colour control is disabled: X60RGB (fw 1.7.0) does not answer 0x100A/0x100B,
+# so the real colour commands still have to be captured from ZY Vega.
+COLOR_CONTROL_ENABLED: Final = False
+
+
 def is_rgb_model(model_code: str | None) -> bool:
-    return model_code in RGB_MODELS
+    return COLOR_CONTROL_ENABLED and model_code in RGB_MODELS
 
 
 def encode_query() -> bytes:

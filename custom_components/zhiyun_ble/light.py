@@ -99,7 +99,8 @@ class ZhiyunLight(LightEntity):
         if not state.firmware and not state.model_name:
             return
         registry = dr.async_get(self.hass)
-        entry = registry.async_get_device_by_identifier((DOMAIN, self._device.address)) if hasattr(registry, "async_get_device_by_identifier") else registry.async_get_device(identifiers={(DOMAIN, self._device.address)})
+        # Entity.device_entry is resolved by HA itself; avoids the deprecated lookup.
+        entry = self.device_entry
         if entry is None:
             return
         changes: dict[str, str] = {}
