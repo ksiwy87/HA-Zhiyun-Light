@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
+    ATTR_HS_COLOR,
     ColorMode,
     LightEntity,
 )
@@ -46,6 +47,8 @@ class ZhiyunLight(LightEntity):
     def __init__(self, device: ZhiyunDevice, entry_id: str) -> None:
         self._device = device
         self._attr_unique_id = device.address
+        if device.supports_color:
+            self._attr_supported_color_modes = {ColorMode.COLOR_TEMP, ColorMode.HS}
         state = device.state
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device.address)},
@@ -84,6 +87,11 @@ class ZhiyunLight(LightEntity):
         self._attr_is_on = state.is_on
         self._attr_brightness = _pct_to_ha(state.brightness)
         self._attr_color_temp_kelvin = state.color_temp_kelvin
+        if state.color_mode == "hs" and state.hs_color is not None:
+            self._attr_color_mode = ColorMode.HS
+            self._attr_hs_color = state.hs_color
+        else:
+            self._attr_color_mode = ColorMode.COLOR_TEMP
 
     @callback
     def _sync_device_registry(self, state: ZhiyunState) -> None:
@@ -91,7 +99,7 @@ class ZhiyunLight(LightEntity):
         if not state.firmware and not state.model_name:
             return
         registry = dr.async_get(self.hass)
-        entry = registry.async_get_device(identifiers={(DOMAIN, self._device.address)})
+        entry = registry.async_get_device_by_identifier((DOMAIN, self._device.address)) if hasattr(registry, "async_get_device_by_identifier") else registry.async_get_device(identifiers={(DOMAIN, self._device.address)})
         if entry is None:
             return
         changes: dict[str, str] = {}
@@ -112,11 +120,13 @@ class ZhiyunLight(LightEntity):
             brightness_pct = _ha_to_pct(ha_brightness)
 
         color_temp_kelvin: int | None = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
+        hs_color: tuple[float, float] | None = kwargs.get(ATTR_HS_COLOR)
 
         try:
             await self._device.async_turn_on(
                 brightness=brightness_pct,
                 color_temp_kelvin=color_temp_kelvin,
+                hs_color=hs_color,
             )
         except ZhiyunError as err:
             raise _to_ha_error(err) from err

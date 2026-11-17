@@ -16,6 +16,7 @@ Frame layout (all multi-byte fields little-endian):
 
 from __future__ import annotations
 
+import re
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
@@ -45,6 +46,7 @@ class Command(IntEnum):
     GET_DEVICE_INFO = 0x2005
     GET_DEVICE_NAME = 0x2003
     GET_FIRMWARE = 0x8001
+    SET_HSI = 0x100A
 
 
 # --- Value ranges ------------------------------------------------------------------
@@ -77,13 +79,27 @@ _PREFIXES_LONGEST_FIRST: Final[tuple[str, ...]] = tuple(
 )
 
 
+_GENERIC_PREFIXES: Final[tuple[str, ...]] = ("PL0", "PL1", "PLB", "PLG", "PLM", "PLX")
+
+
 def resolve_model(advertised_name: str | None) -> tuple[str | None, str | None]:
     """Return `(model_code, friendly_name)` or `(None, None)` for unsupported names."""
     if not advertised_name:
         return None, None
-    for prefix in _PREFIXES_LONGEST_FIRST:
-        if advertised_name.startswith(prefix):
-            return prefix, MODEL_NAMES[prefix]
+    # Some models advertise without the "PL" prefix (e.g. "X104_EE1C" = PLX104).
+    candidates = [advertised_name]
+    if not advertised_name.startswith("PL"):
+        candidates.append("PL" + advertised_name)
+    for candidate in candidates:
+        for prefix in _PREFIXES_LONGEST_FIRST:
+            if candidate.startswith(prefix):
+                return prefix, MODEL_NAMES[prefix]
+    if not advertised_name.startswith("PL") and re.match(r"^[0BGMX]\d{3}_", advertised_name):
+        advertised_name = "PL" + advertised_name
+    # Unknown model with a Zhiyun-style name (e.g. G60RGB): accept it generically.
+    if advertised_name.startswith(_GENERIC_PREFIXES):
+        code = advertised_name.split("_")[0].split(" ")[0]
+        return code, f"Zhiyun {code}"
     return None, None
 
 
@@ -137,6 +153,39 @@ def encode_brightness(value: float) -> bytes:
 
 def encode_color_temp(kelvin: int) -> bytes:
     return _SUBCMD_CONTROL + b"\x01" + struct.pack("<H", int(kelvin))
+
+
+def encode_hsi(hue: float, saturation: float, intensity: float) -> bytes:
+    """HSI payload: hue f32 (0-360), saturation f32 (0-100), intensity u16 (0-100).
+
+    Field layout from libzylink.so analysis (zyvega project); value units are
+    not hardware-verified yet.
+    """
+    return (
+        _SUBCMD_CONTROL
+        + b"\x01"
+        + struct.pack("<ffH", float(hue), float(saturation), int(round(intensity)))
+    )
+
+
+def encode_hsi_query() -> bytes:
+    return _SUBCMD_CONTROL + b"\x00" + bytes(10)
+
+
+def decode_hsi_response(payload: bytes) -> tuple[float, float, int] | None:
+    if len(payload) < 13:
+        return None
+    return struct.unpack_from("<ffH", payload, 3)
+
+
+# Models with an RGB/HSI engine (advertised generation codes).
+RGB_MODELS: Final[frozenset[str]] = frozenset(
+    {"PLX104", "PLX110", "PLX113", "PLX109", "PLM103", "PLM110"}
+)
+
+
+def is_rgb_model(model_code: str | None) -> bool:
+    return model_code in RGB_MODELS
 
 
 def encode_query() -> bytes:
@@ -193,9 +242,11 @@ def decode_color_temp_response(payload: bytes) -> int | None:
 
 
 def decode_power_response(payload: bytes) -> bool | None:
-    if len(payload) < 3:
+    # Payload: target(2) + operation(1) + value(1). Byte 2 is the operation
+    # (1 = set echo), the actual power state is byte 3.
+    if len(payload) < 4:
         return None
-    return payload[2] == 0x01
+    return payload[3] == 0x01
 
 
 def decode_firmware_response(payload: bytes) -> str:

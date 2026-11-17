@@ -30,6 +30,7 @@ from .protocol import Command, ProtocolError
 _LOGGER = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT: Final = 20.0
+_CONNECT_ATTEMPTS: Final = 4
 _WRITE_TIMEOUT: Final = 10.0
 _DEFAULT_IDLE_DISCONNECT: Final = 20.0
 _POWER_SETTLE_DELAY: Final = 0.1
@@ -53,6 +54,8 @@ class ZhiyunState:
     is_on: bool = False
     brightness: float = 0.0  # 0–100
     color_temp_kelvin: int = 5600
+    hs_color: tuple[float, float] | None = None
+    color_mode: str = "color_temp"  # "color_temp" or "hs"
     firmware: str = ""
     model_code: str | None = None
     model_name: str | None = None
@@ -112,6 +115,10 @@ class ZhiyunDevice:
         return self._state
 
     @property
+    def supports_color(self) -> bool:
+        return p.is_rgb_model(self._state.model_code)
+
+    @property
     def available(self) -> bool:
         return self._available
 
@@ -148,17 +155,27 @@ class ZhiyunDevice:
         *,
         brightness: float | None = None,
         color_temp_kelvin: int | None = None,
+        hs_color: tuple[float, float] | None = None,
     ) -> None:
         async with self._lock:
             await self._ensure_connected()
             if not self._state.is_on:
                 await self._power(on=True)
                 await asyncio.sleep(_POWER_SETTLE_DELAY)
-            if color_temp_kelvin is not None:
-                await self._color_temp(color_temp_kelvin)
             target = brightness if brightness is not None else self._last_nonzero_brightness
-            if target > 0:
-                await self._brightness(target)
+            if hs_color is not None and self.supports_color:
+                await self._hsi(hs_color, target)
+                return_after = True
+            else:
+                return_after = False
+                if color_temp_kelvin is not None:
+                    await self._color_temp(color_temp_kelvin)
+            if not return_after and target > 0:
+                if self._state.color_mode == "hs" and self._state.hs_color and color_temp_kelvin is None:
+                    # Stay in colour mode: re-send HSI with the new intensity.
+                    await self._hsi(self._state.hs_color, target)
+                else:
+                    await self._brightness(target)
         self._arm_idle_disconnect()
 
     async def async_turn_off(self) -> None:
@@ -208,12 +225,23 @@ class ZhiyunDevice:
     async def _color_temp(self, kelvin: int) -> None:
         clamped = max(p.COLOR_TEMP_MIN_KELVIN, min(p.COLOR_TEMP_MAX_KELVIN, int(kelvin)))
         await self._write(Command.SET_COLOR_TEMP, p.encode_color_temp(clamped))
-        self._update_state(color_temp_kelvin=clamped)
+        self._update_state(color_temp_kelvin=clamped, color_mode="color_temp")
+
+    async def _hsi(self, hs_color: tuple[float, float], intensity: float) -> None:
+        hue = float(hs_color[0]) % 360.0
+        sat = max(0.0, min(100.0, float(hs_color[1])))
+        level = max(1.0, min(100.0, float(intensity)))
+        await self._write(Command.SET_HSI, p.encode_hsi(hue, sat, level))
+        self._last_nonzero_brightness = level
+        self._update_state(
+            hs_color=(hue, sat), color_mode="hs", brightness=level, is_on=True
+        )
 
     async def _write(self, command: Command, payload: bytes) -> None:
         if self._client is None or self._write_char is None:
             raise ZhiyunConnectionError("not connected")
         frame = p.build_packet(command, payload, self._next_sequence())
+        _LOGGER.debug("%s: TX %s %s", self._name, command.name, frame.hex(" "))
         try:
             async with asyncio.timeout(_WRITE_TIMEOUT):
                 await self._client.write_gatt_char(self._write_char, frame, response=False)
@@ -240,14 +268,16 @@ class ZhiyunDevice:
         await close_stale_connections(self._ble_device)
 
         try:
-            async with asyncio.timeout(_CONNECT_TIMEOUT):
-                client = await establish_connection(
-                    BleakClientWithServiceCache,
-                    self._ble_device,
-                    self._name,
-                    disconnected_callback=self._on_unexpected_disconnect,
-                    ble_device_callback=lambda: self._ble_device,
-                )
+            # No outer timeout: bleak-retry-connector applies its own per-attempt
+            # timeout and retries; wrapping it cut the first attempt short.
+            client = await establish_connection(
+                BleakClientWithServiceCache,
+                self._ble_device,
+                self._name,
+                disconnected_callback=self._on_unexpected_disconnect,
+                ble_device_callback=lambda: self._ble_device,
+                max_attempts=_CONNECT_ATTEMPTS,
+            )
         except BleakNotFoundError as err:
             raise ZhiyunConnectionError(f"{self._name} not in range") from err
         except TimeoutError as err:
@@ -266,6 +296,10 @@ class ZhiyunDevice:
             await client.disconnect()
             raise ZhiyunServiceError(f"characteristics missing on {self._name}")
 
+        _LOGGER.debug(
+            "%s: connected; write props=%s notify props=%s",
+            self._name, write_char.properties, notify_char.properties,
+        )
         await client.start_notify(notify_char, self._on_notify)
 
         self._client = client
@@ -286,6 +320,9 @@ class ZhiyunDevice:
             (Command.READ_DEVICE_STATE, p.encode_query()),
             (Command.QUERY_BRIGHTNESS, p.encode_query()),
         )
+        if self.supports_color:
+            # Diagnostic: read back current HSI so units can be checked in logs.
+            handshake += ((Command.SET_HSI, p.encode_hsi_query()),)
         for command, payload in handshake:
             try:
                 await self._write(command, payload)
@@ -346,6 +383,7 @@ class ZhiyunDevice:
     # -----------------------------------------------------------------------------
 
     def _on_notify(self, _char: BleakGATTCharacteristic, data: bytearray) -> None:
+        _LOGGER.debug("%s: RX %s", self._name, bytes(data).hex(" "))
         try:
             response = p.parse_frame(bytes(data))
         except ProtocolError as err:
@@ -364,6 +402,12 @@ class ZhiyunDevice:
             case Command.POWER_STATE:
                 if (is_on := p.decode_power_response(payload)) is not None:
                     self._update_state(is_on=is_on)
+            case Command.SET_HSI:
+                if (hsi := p.decode_hsi_response(payload)) is not None:
+                    _LOGGER.debug(
+                        "%s: HSI response hue=%.1f sat=%.1f intensity=%d (op=%d)",
+                        self._name, hsi[0], hsi[1], hsi[2], payload[2],
+                    )
             case Command.GET_FIRMWARE:
                 self._update_state(firmware=p.decode_firmware_response(payload))
 
